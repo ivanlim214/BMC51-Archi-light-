@@ -447,6 +447,7 @@ input[type=range].slider{width:100%;accent-color:var(--acc);cursor:pointer;displ
           <span><span class="sv-legend-dot" style="background:rgba(107,114,128,.5)"></span>Not Started</span>
         </div>
         <div class="sep"></div>
+        <button class="btn" onclick="openImport()">&#8593; Import</button>
         <button class="btn" onclick="exportSvXlsx()">&#8595; Export</button>
       </div>
       <div class="sv-body" id="svBody"></div>
@@ -540,7 +541,14 @@ input[type=range].slider{width:100%;accent-color:var(--acc);cursor:pointer;displ
     </div>
     <div class="modal-body">
       <div class="modal-desc">
-        Drop an <code>.xlsx</code> file exported from this app. The file must contain a sheet named <code>TAKT_EDITS</code> with columns: <code>Storey</code>, <code>Trade</code>, <code>Start</code>, <code>End</code>, <code>Duration</code>, <code>Pct</code>, <code>DaysDone</code>. Only rows with data will update existing tasks.
+        Drop any <code>.xlsx</code> exported from this app. Supported sheets:
+        <ul style="margin:8px 0 4px 16px;line-height:2;font-size:11px">
+          <li><code>TAKT Schedule</code> — from the main ↓ Export button</li>
+          <li><code>Trade Schedule</code> — from the Trade Schedule tab</li>
+          <li><code>Schedule View</code> — from the Schedule View tab</li>
+          <li><code>TAKT_EDITS</code> — from a previous export cycle</li>
+        </ul>
+        Tasks are matched by Trade + Storey. <strong>% Complete</strong> is imported where available; Schedule View imports dates only.
       </div>
       <div class="drop-zone" id="dropZone"
         ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)"
@@ -934,52 +942,144 @@ function processImportFile(file){
   reader.onload=function(e){
     try{
       var wb=XLSX.read(e.target.result,{type:'array'});
-      var wsName='TAKT_EDITS';
-      if(!wb.SheetNames.includes(wsName)){
-        st.className='imp-status err';
-        st.textContent='Sheet "TAKT_EDITS" not found. Please export from this app first, then re-import.';
-        return;
+
+      // Parse a cell value (serial number, ISO string, or date string) to YYYY-MM-DD
+      function parseXlDate(v){
+        if(v==null||v==='')return null;
+        if(typeof v==='number'){var d=XLSX.SSF.parse_date_code(v);if(!d)return null;return d.y+'-'+pad(d.m)+'-'+pad(d.d);}
+        var s=String(v).trim();
+        if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;
+        var dt=new Date(s);if(!isNaN(dt.getTime()))return fmt(dt);
+        return null;
       }
-      var ws=wb.Sheets[wsName];
-      var rows=XLSX.utils.sheet_to_json(ws,{header:1});
-      if(rows.length<2){st.className='imp-status err';st.textContent='No data rows found in TAKT_EDITS sheet.';return;}
-      var header=rows[0].map(function(h){return String(h).trim();});
-      var iStorey=header.indexOf('Storey'),iTrade=header.indexOf('Trade');
-      var iStart=header.indexOf('Start'),iEnd=header.indexOf('End');
-      var iDur=header.indexOf('Duration'),iPct=header.indexOf('Pct'),iDone=header.indexOf('DaysDone');
-      if(iStorey<0||iTrade<0){st.className='imp-status err';st.textContent='Missing required columns: Storey, Trade.';return;}
-      var updated=0,skipped=0;
-      for(var i=1;i<rows.length;i++){
-        var row=rows[i];
-        var storey=String(row[iStorey]||'').trim();
-        var trade=String(row[iTrade]||'').trim();
-        if(!storey||!trade){skipped++;continue;}
-        // Find matching task
-        var t=T.find(function(x){return x.storey===storey&&x.trade===trade;});
-        if(!t){skipped++;continue;}
+
+      // Find a column index by any of several header aliases (case-insensitive)
+      function col(hdr,aliases){
+        for(var ai=0;ai<aliases.length;ai++){
+          for(var hi=0;hi<hdr.length;hi++){
+            if(String(hdr[hi]||'').trim().toLowerCase()===aliases[ai].toLowerCase())return hi;
+          }
+        }
+        return -1;
+      }
+
+      // Apply one parsed row to EDITS; returns true if matched, false if skipped
+      function applyRow(trade,storey,start,end,dur,pct,done){
+        trade=String(trade||'').trim();storey=String(storey||'').trim();
+        if(!trade||!storey)return false;
+        var t=T.find(function(x){return x.trade===trade&&x.storey===storey;});
+        if(!t)return false;
         var key=taskKey(t);
         var ed=EDITS[key]||{};
-        // Parse date helper
-        function parseXlDate(v){
-          if(!v)return null;
-          if(typeof v==='number'){var d=XLSX.SSF.parse_date_code(v);return d.y+'-'+pad(d.m)+'-'+pad(d.d);}
-          var s=String(v).trim();
-          if(/^\d{4}-\d{2}-\d{2}$/.test(s))return s;
-          var dt=new Date(s);if(!isNaN(dt))return fmt(dt);
-          return null;
-        }
-        if(iStart>=0&&row[iStart]!=null){var s=parseXlDate(row[iStart]);if(s)ed.start=s;}
-        if(iEnd>=0&&row[iEnd]!=null){var en=parseXlDate(row[iEnd]);if(en)ed.end=en;}
-        if(iDur>=0&&row[iDur]!=null&&row[iDur]!==''){ed.dur=Math.max(1,parseInt(row[iDur])||1);}
-        if(iPct>=0&&row[iPct]!=null&&row[iPct]!==''){ed.pct=Math.max(0,Math.min(100,parseInt(row[iPct])||0));}
-        if(iDone>=0&&row[iDone]!=null&&row[iDone]!==''){ed.done=Math.max(0,parseInt(row[iDone])||0);}
+        var s=parseXlDate(start);if(s)ed.start=s;
+        var en=parseXlDate(end);if(en)ed.end=en;
+        if(dur!=null&&dur!==''){var dv=parseInt(dur);if(!isNaN(dv)&&dv>0)ed.dur=dv;}
+        if(pct!=null&&pct!==''){var pv=parseInt(pct);if(!isNaN(pv))ed.pct=Math.max(0,Math.min(100,pv));}
+        if(done!=null&&done!==''){var dnv=parseInt(done);if(!isNaN(dnv))ed.done=Math.max(0,dnv);}
         EDITS[key]=ed;
-        updated++;
+        return true;
       }
+
+      var updated=0,skipped=0,sheetUsed='';
+
+      // ── Detect which sheet to use, in priority order ──────────────────────
+      var SHEET_TAKT_EDITS   = wb.SheetNames.find(function(n){return n==='TAKT_EDITS';});
+      var SHEET_TAKT_SCH     = wb.SheetNames.find(function(n){return n==='TAKT Schedule';});
+      var SHEET_TRADE_SCH    = wb.SheetNames.find(function(n){return n==='Trade Schedule';});
+
+      if(SHEET_TAKT_EDITS){
+        // ── Legacy TAKT_EDITS sheet (exported by this app) ────────────────
+        sheetUsed='TAKT_EDITS';
+        var ws=wb.Sheets[SHEET_TAKT_EDITS];
+        var rowsStr=XLSX.utils.sheet_to_json(ws,{header:1,raw:false});
+        var rowsRaw=XLSX.utils.sheet_to_json(ws,{header:1,raw:true});
+        if(rowsStr.length>=2){
+          var hdr=rowsStr[0].map(function(h){return String(h||'').trim();});
+          var iT=col(hdr,['Trade']),iS=col(hdr,['Storey']);
+          var iSt=col(hdr,['Start']),iEn=col(hdr,['End']);
+          var iDr=col(hdr,['Duration','Dur']),iPc=col(hdr,['Pct','% Complete','% complete','Percent']),iDn=col(hdr,['DaysDone','Days Done']);
+          for(var i=1;i<rowsRaw.length;i++){
+            var r=rowsRaw[i];
+            if(applyRow(r[iT],r[iS],iSt>=0?r[iSt]:null,iEn>=0?r[iEn]:null,iDr>=0?r[iDr]:null,iPc>=0?r[iPc]:null,iDn>=0?r[iDn]:null))updated++;
+            else skipped++;
+          }
+        }
+
+      } else if(SHEET_TAKT_SCH||SHEET_TRADE_SCH){
+        // ── "TAKT Schedule" or "Trade Schedule" sheet ─────────────────────
+        // Both share the same column structure:
+        // Row 1 = title banner, Row 2 = column headers, Row 3+ = data
+        // (Trade Schedule also has group-header rows where Storey cell is blank)
+        var wsName=SHEET_TAKT_SCH||SHEET_TRADE_SCH;
+        sheetUsed=wsName;
+        var ws=wb.Sheets[wsName];
+        var rowsStr=XLSX.utils.sheet_to_json(ws,{header:1,raw:false});
+        var rowsRaw=XLSX.utils.sheet_to_json(ws,{header:1,raw:true});
+
+        // Find the header row (first row with both 'Trade' and 'Storey')
+        var hdrIdx=-1,hdr=[];
+        for(var ri=0;ri<Math.min(rowsStr.length,6);ri++){
+          var r0=rowsStr[ri].map(function(c){return String(c||'').trim();});
+          if(col(r0,['Trade'])>=0&&col(r0,['Storey'])>=0){hdrIdx=ri;hdr=r0;break;}
+        }
+        if(hdrIdx<0){
+          st.className='imp-status err';
+          st.textContent='Cannot find header row in sheet "'+wsName+'". Expected columns: Trade, Storey.';
+          return;
+        }
+        var iT=col(hdr,['Trade']),iS=col(hdr,['Storey']);
+        var iSt=col(hdr,['Start']),iEn=col(hdr,['End']);
+        var iDr=col(hdr,['Duration (d)','Duration','Dur']);
+        var iPc=col(hdr,['% Complete','% complete','Pct','Percent']);
+        var iDn=col(hdr,['Days Done','DaysDone']);
+
+        for(var i=hdrIdx+1;i<rowsRaw.length;i++){
+          var r=rowsRaw[i];
+          // Skip group-header rows: these have a trade name but no storey
+          if(!r[iS]){skipped++;continue;}
+          if(applyRow(r[iT],r[iS],iSt>=0?r[iSt]:null,iEn>=0?r[iEn]:null,iDr>=0?r[iDr]:null,iPc>=0?r[iPc]:null,iDn>=0?r[iDn]:null))updated++;
+          else skipped++;
+        }
+
+      } else if(wb.SheetNames.find(function(n){return n==='Schedule View';})){
+        // ── "Schedule View" sheet ─────────────────────────────────────────
+        // Matrix format: Row1=title, Row2=trade names (abbreviated), Row3=Start/End/Status headers
+        // Cols: Floor | T0-Start T0-End T0-Status | T1-Start T1-End T1-Status | ...
+        // Trade column position maps to full name by index (position 0 = trade 0, etc.)
+        sheetUsed='Schedule View';
+        var ws=wb.Sheets['Schedule View'];
+        var rowsRaw=XLSX.utils.sheet_to_json(ws,{header:1,raw:true});
+        // Row 2 (index 1): find how many trades by counting non-null entries after col 0
+        // Every 3 columns = one trade: Start | End | Status
+        var nTrades=Math.floor((rowsRaw[1]?rowsRaw[1].length-1:0)/3);
+        // Data rows start at index 3 (row 4)
+        for(var i=3;i<rowsRaw.length;i++){
+          var r=rowsRaw[i];
+          var storey=String(r[0]||'').trim();
+          if(!storey)continue;
+          for(var ti=0;ti<nTrades;ti++){
+            var baseCol=1+ti*3; // Start col for this trade
+            var trade=TRADE_ORDER[ti];
+            if(!trade)continue;
+            var start=r[baseCol]!=null?r[baseCol]:null;
+            var end=r[baseCol+1]!=null?r[baseCol+1]:null;
+            // Schedule View doesn't contain % Complete — only dates
+            if(applyRow(trade,storey,start,end,null,null,null))updated++;
+            else skipped++;
+          }
+        }
+
+      } else {
+        // No recognised sheet found
+        st.className='imp-status err';
+        st.textContent='No supported sheet found. Expected one of: "TAKT_EDITS", "TAKT Schedule", "Trade Schedule", "Schedule View". File contains: '+wb.SheetNames.join(', ')+'.';
+        return;
+      }
+
       renderGantt();
+      var _ec=Object.keys(EDITS).length;document.getElementById('editNum').textContent=_ec;document.getElementById('editCount').classList.toggle('on',_ec>0);
       st.className='imp-status ok';
-      st.textContent='&#10003; Imported successfully: '+updated+' tasks updated'+(skipped?' ('+skipped+' rows skipped)':'')+'.'
-        +' The Gantt has been refreshed.';
+      st.textContent='✓ Imported from “'+sheetUsed+'”: '+updated+' tasks updated'+(skipped?' ('+skipped+' rows skipped)':'')+'. Charts refreshed.';
     }catch(err){
       st.className='imp-status err';
       st.textContent='Error reading file: '+err.message;
@@ -987,6 +1087,7 @@ function processImportFile(file){
   };
   reader.readAsArrayBuffer(file);
 }
+
 
 // ==============================
 // LINE OF BALANCE ENGINE
