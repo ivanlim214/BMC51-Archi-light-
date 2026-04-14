@@ -541,14 +541,14 @@ input[type=range].slider{width:100%;accent-color:var(--acc);cursor:pointer;displ
     </div>
     <div class="modal-body">
       <div class="modal-desc">
-        Drop any <code>.xlsx</code> exported from this app. Supported sheets:
+        Drop any <code>.xlsx</code> exported from this app. The export always includes the current <strong>% Complete</strong> you have recorded. Supported sheets:
         <ul style="margin:8px 0 4px 16px;line-height:2;font-size:11px">
           <li><code>TAKT Schedule</code> — from the main ↓ Export button</li>
           <li><code>Trade Schedule</code> — from the Trade Schedule tab</li>
           <li><code>Schedule View</code> — from the Schedule View tab</li>
           <li><code>TAKT_EDITS</code> — from a previous export cycle</li>
         </ul>
-        Tasks are matched by Trade + Storey. <strong>% Complete</strong> is imported where available; Schedule View imports dates only.
+        Tasks are matched by Trade + Storey. Round-trip: export → import will restore your recorded progress.
       </div>
       <div class="drop-zone" id="dropZone"
         ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)"
@@ -909,10 +909,58 @@ function saveEdit(){
   if(TAB==='schedview')renderSchedView();
 }
 
-// ---- EXPORT TO EXCEL ----
+// ---- DYNAMIC EXPORT TO EXCEL (includes current % Complete from session) ----
+function buildExportWorkbook(){
+  // Build a fresh workbook using SheetJS with live EDITS data
+  if(typeof XLSX==='undefined'){alert('SheetJS not loaded. Please refresh and try again.');return null;}
+  var wb=XLSX.utils.book_new();
+
+  // ── Sheet 1: TAKT Schedule ───────────────────────────────────────────────
+  var rows1=[['BMC51 Block 98A – TAKT Schedule']];
+  rows1.push(['Trade','Storey','Start','End','Duration (d)','% Complete','Var Start (d)','Status']);
+  T.forEach(function(t){
+    var eff=getEffective(t);
+    var pct=eff.pct!==undefined?eff.pct:0;
+    var baseStart=pd(t.start);
+    var effStart=pd(eff.start);
+    var varD=Math.round((effStart-baseStart)/86400000);
+    var status=pct===100?'Complete':pct>0?'In Progress':(eff.end<todayStr&&pct<100)?'At Risk':'Not Started';
+    rows1.push([t.trade,t.storey,eff.start,eff.end,eff.dur,pct,varD,status]);
+  });
+  var ws1=XLSX.utils.aoa_to_sheet(rows1);
+  ws1['!merges']=[{s:{r:0,c:0},e:{r:0,c:7}}];
+  ws1['!cols']=[{wch:52},{wch:14},{wch:12},{wch:12},{wch:13},{wch:12},{wch:14},{wch:14}];
+  XLSX.utils.book_append_sheet(wb,ws1,'TAKT Schedule');
+
+  // ── Sheet 2: Trade Schedule ──────────────────────────────────────────────
+  var rows2=[['BMC51 Block 98A – Trade Schedule']];
+  rows2.push(['Trade','Storey','Start','End','Duration (d)','% Complete','Days Done','Status']);
+  var byTrade={};
+  T.forEach(function(t){byTrade[t.trade]=byTrade[t.trade]||[];byTrade[t.trade].push(t);});
+  TRADE_ORDER.forEach(function(tr){
+    if(!byTrade[tr])return;
+    rows2.push([tr,'','','','','','','']); // group header
+    byTrade[tr].forEach(function(t){
+      var eff=getEffective(t);
+      var pct=eff.pct!==undefined?eff.pct:0;
+      var done=eff.done!==undefined?eff.done:0;
+      var status=pct===100?'Complete':pct>0?'In Progress':(eff.end<todayStr&&pct<100)?'At Risk':'Not Started';
+      rows2.push([t.trade,t.storey,eff.start,eff.end,eff.dur,pct,done,status]);
+    });
+  });
+  var ws2=XLSX.utils.aoa_to_sheet(rows2);
+  ws2['!merges']=[{s:{r:0,c:0},e:{r:0,c:7}}];
+  ws2['!cols']=[{wch:52},{wch:14},{wch:12},{wch:12},{wch:13},{wch:12},{wch:12},{wch:14}];
+  XLSX.utils.book_append_sheet(wb,ws2,'Trade Schedule');
+
+  return wb;
+}
+
 function exportXlsx(){
+  var wb=buildExportWorkbook();if(!wb)return;
   var ts=new Date();
-  downloadExcel('BMC51_Takt_Export_'+ts.getFullYear()+pad(ts.getMonth()+1)+pad(ts.getDate())+'.xlsx');
+  var filename='BMC51_Takt_Export_'+ts.getFullYear()+pad(ts.getMonth()+1)+pad(ts.getDate())+'.xlsx';
+  XLSX.writeFile(wb,filename);
 }
 
 // ---- IMPORT FROM EXCEL ----
@@ -1863,8 +1911,10 @@ function renderSchedule(){
 }
 
 function exportScheduleXlsx(){
+  var wb=buildExportWorkbook();if(!wb)return;
   var ts=new Date();
-  downloadExcel('BMC51_Trade_Schedule_'+ts.getFullYear()+pad(ts.getMonth()+1)+pad(ts.getDate())+'.xlsx');
+  var filename='BMC51_Trade_Schedule_'+ts.getFullYear()+pad(ts.getMonth()+1)+pad(ts.getDate())+'.xlsx';
+  XLSX.writeFile(wb,filename);
 }
 
 // ==============================
@@ -2378,13 +2428,10 @@ function svOpenEdit(storey,trade){
 }
 
 function exportSvXlsx(){
+  var wb=buildExportWorkbook();if(!wb)return;
   var ts=new Date();
-  downloadExcel('BMC51_Schedule_View_'+ts.getFullYear()+pad(ts.getMonth()+1)+pad(ts.getDate())+'.xlsx');
-}
-
-function exportSvXlsx(){
-  var ts=new Date();
-  downloadExcel('BMC51_Schedule_View_'+ts.getFullYear()+pad(ts.getMonth()+1)+pad(ts.getDate())+'.xlsx');
+  var filename='BMC51_Schedule_View_'+ts.getFullYear()+pad(ts.getMonth()+1)+pad(ts.getDate())+'.xlsx';
+  XLSX.writeFile(wb,filename);
 }
 
 // ==============================
